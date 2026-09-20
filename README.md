@@ -159,6 +159,21 @@ echo "List the three largest files under ~/projects/foo." | ASK_CHAT_ID=12 scrip
 scripts/ask.sh --stop     # stop the runner the script started
 ```
 
+To exercise the same path the chat application uses (a plain `INSERT`, no
+HTTP), `scripts/enqueue.py` writes the row directly and polls the table until
+the runner has answered, then prints both rows and the `ai` reply. It uses the
+admin login from the Granite Manager env file (`DB_HOST`/`DB_USER`/
+`DB_PASSWORD` in `~/general_datebase/.env`, override with `--env-file`) against
+the `main` database, so it can also create the `chats` row a message needs.
+It runs with [uv](https://docs.astral.sh/uv/), which fetches `pymysql` itself.
+
+```sh
+scripts/enqueue.py "Summarise README.md in three bullets."   # new chat for user 1
+scripts/enqueue.py --chat 12 "Follow-up in an existing chat"
+scripts/enqueue.py --no-wait "Long task"                       # print ids and exit
+scripts/enqueue.py --show 345                                  # watch an existing row
+```
+
 The HTTP API itself:
 
 | Method | Path         | Body                                 | Response                         |
