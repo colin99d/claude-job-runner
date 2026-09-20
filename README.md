@@ -64,6 +64,11 @@ Things the sandbox does **not** do for you:
 * Reads of credentials such as `~/.ssh` are allowed by default, as in any
   Claude Code session. Add `denyRead` entries via `CLAUDE_CONFIG_DIR`
   settings if that matters to you.
+* The job's environment is the runner's, minus `DATABASE_URL`: the writable
+  login stays with the daemon, and jobs get `AGENT_DATABASE_URL` (a
+  read-only login) as their `DATABASE_URL` instead. Since jobs run as the
+  same OS user and can read files, keep the writable URL out of `.env` and
+  pass it to the daemon through a root-only file (see *Deploying*).
 
 Because the workspace is deleted after each job, a job that should change
 one of your projects needs a way to get its work out. The intended pattern
@@ -98,6 +103,42 @@ allow-listed), or to return a diff as its answer.
 
 The daemon exits cleanly on Ctrl-C / SIGTERM. A job that is still running at
 that moment is killed and recorded as `failed`.
+
+## Deploying (Ubuntu + systemd)
+
+The production layout this repository's `Makefile` assumes:
+
+* a dedicated user `runner` with rustup and Claude Code installed, and the
+  repository cloned to `/home/runner/claude-job-runner`;
+* `.env` in that directory (owned by `runner`, mode `600`) with everything
+  **except** the writable `DATABASE_URL`;
+* `/etc/claude-job-runner/secrets.env` (root, mode `600`) with the values
+  jobs must never see: the writable `DATABASE_URL` and
+  `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`). The systemd unit
+  loads it with `EnvironmentFile=` and runs the binary as `runner`.
+
+Two Ubuntu 24.04 specifics:
+
+* Claude Code's Linux sandbox needs `bubblewrap` and `socat`, and 24.04
+  restricts unprivileged user namespaces, so `bwrap` fails with
+  `RTM_NEWADDR: Operation not permitted` until it gets an AppArmor profile:
+
+  ```
+  # /etc/apparmor.d/bwrap
+  abi <abi/4.0>,
+  include <tunables/global>
+  profile bwrap /usr/bin/bwrap flags=(unconfined) {
+    userns,
+  }
+  ```
+
+  then `apparmor_parser -r /etc/apparmor.d/bwrap`.
+* `cargo build --release` needs more than 2 GB of RAM; on a 2 GB instance
+  add a 2 GB swap file first.
+
+`make help` lists the day-to-day targets (`make env`, `make secrets`,
+`make deploy`, `make logs`, ...). Server targets run on the host, or forward
+themselves over SSH when invoked from a laptop.
 
 ## Enqueuing work
 
@@ -144,6 +185,7 @@ All settings come from the environment (a `.env` file is loaded if present).
 |----------------------------|--------------------|------------------------------------------------------|
 | `DATABASE_URL`             | required           | `mysql://…` (the database holding `chat_messages`)   |
 | `DB_MAX_CONNECTIONS`       | `5`                | Pool size                                            |
+| `AGENT_DATABASE_URL`       | (none)             | `DATABASE_URL` exported to jobs (read-only login); the runner's own is never passed on |
 | `WORKSPACE_ROOT`           | `./workspaces`     | Parent of per-job directories; `job-*` dirs are swept on start |
 | `POLL_INTERVAL_SECS`       | `5`                | Sleep between polls when the queue is empty          |
 | `MAX_CONCURRENT_JOBS`      | `1`                | Jobs (and `claude` processes) running at the same time |

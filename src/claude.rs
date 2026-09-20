@@ -143,6 +143,10 @@ pub struct ClaudeConfig {
     /// every server is a separate Node process, so servers configured in the
     /// user's settings are never inherited.
     pub mcp_config: Option<PathBuf>,
+    /// `DATABASE_URL` as seen by the job, normally a read-only login. The
+    /// runner's own (writable) `DATABASE_URL` is never passed on; with
+    /// `None` the job sees no `DATABASE_URL` at all.
+    pub agent_database_url: Option<String>,
 }
 
 impl Default for ClaudeConfig {
@@ -159,6 +163,7 @@ impl Default for ClaudeConfig {
             persist_sessions: false,
             config_dir: None,
             mcp_config: None,
+            agent_database_url: None,
         }
     }
 }
@@ -221,6 +226,11 @@ impl ClaudeConfig {
         cmd.env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
         if let Some(dir) = &self.config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
+        }
+        // The job must not inherit the runner's writable database login.
+        cmd.env_remove("DATABASE_URL");
+        if let Some(url) = &self.agent_database_url {
+            cmd.env("DATABASE_URL", url);
         }
         cmd
     }
@@ -448,6 +458,7 @@ mod tests {
             persist_sessions: false,
             config_dir: Some(PathBuf::from("/cfg")),
             mcp_config: Some(PathBuf::from("/cfg/mcp.json")),
+            agent_database_url: Some("mysql://ro:pw@db/main".to_owned()),
             ..ClaudeConfig::default()
         };
         let ws = Path::new("/tmp/ws");
@@ -486,6 +497,9 @@ mod tests {
             envs.iter()
                 .any(|(k, v)| *k == "CLAUDE_CONFIG_DIR" && v.is_some())
         );
+        assert!(envs.iter().any(|(k, v)| {
+            *k == "DATABASE_URL" && v.is_some_and(|v| v == "mysql://ro:pw@db/main")
+        }));
     }
 
     #[test]
@@ -504,6 +518,13 @@ mod tests {
                 .any(|w| w == ["--mcp-config", r#"{"mcpServers":{}}"#])
         );
         assert!(args.contains(&"--strict-mcp-config".to_owned()));
+    }
+
+    #[test]
+    fn runner_database_url_is_never_inherited() {
+        let cmd = ClaudeConfig::default().command(Path::new("/tmp"));
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.iter().any(|(k, v)| *k == "DATABASE_URL" && v.is_none()));
     }
 
     #[test]

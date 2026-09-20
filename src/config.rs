@@ -65,6 +65,7 @@ impl Config {
             persist_sessions: optional("CLAUDE_PERSIST_SESSIONS")?.unwrap_or(false),
             config_dir: optional("CLAUDE_CONFIG_DIR")?,
             mcp_config: optional("CLAUDE_MCP_CONFIG")?,
+            agent_database_url: optional("AGENT_DATABASE_URL")?,
         };
 
         Ok(Self {
