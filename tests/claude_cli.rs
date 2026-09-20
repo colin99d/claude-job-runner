@@ -57,6 +57,7 @@ async fn successful_run_is_parsed_and_invoked_correctly() {
     assert!(args.windows(2).any(|w| w == ["--output-format", "json"]));
     assert!(args.windows(2).any(|w| w == ["--model", "opus"]));
     assert!(args.windows(2).any(|w| w == ["--max-turns", "3"]));
+    assert!(args.windows(2).any(|w| w == ["--effort", "low"]));
     assert!(
         args.windows(2)
             .any(|w| w == ["--permission-mode", "acceptEdits"])

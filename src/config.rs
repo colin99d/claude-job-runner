@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use crate::claude::{ClaudeConfig, PermissionMode};
+use crate::claude::{ClaudeConfig, Effort, PermissionMode};
 
 /// Errors from reading the environment.
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +60,7 @@ impl Config {
             timeout: Duration::from_secs(optional("CLAUDE_TIMEOUT_SECS")?.unwrap_or(30 * 60)),
             permission_mode: optional::<PermissionMode>("CLAUDE_PERMISSION_MODE")?
                 .unwrap_or_default(),
+            effort: optional::<Effort>("CLAUDE_EFFORT")?.unwrap_or_default(),
             allowed_domains: list("CLAUDE_ALLOWED_DOMAINS")?,
             persist_sessions: optional("CLAUDE_PERSIST_SESSIONS")?.unwrap_or(false),
             config_dir: optional("CLAUDE_CONFIG_DIR")?,

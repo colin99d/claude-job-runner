@@ -64,6 +64,57 @@ impl FromStr for PermissionMode {
     }
 }
 
+/// Claude Code effort level passed via `--effort`. Controls how much the
+/// model thinks before acting; lower levels are cheaper and faster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Effort {
+    /// Minimal thinking. The default for jobs: most of them are routine.
+    #[default]
+    Low,
+    /// Moderate thinking.
+    Medium,
+    /// The CLI's own default.
+    High,
+    /// Deep thinking for hard coding and agentic work.
+    XHigh,
+    /// Maximum thinking; correctness over cost.
+    Max,
+}
+
+/// Error returned for an unrecognised effort level string.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown effort level {0:?}: expected low, medium, high, xhigh or max")]
+pub struct UnknownEffort(pub String);
+
+impl Effort {
+    /// The value Claude Code expects on the command line.
+    #[must_use]
+    pub const fn as_cli_value(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl FromStr for Effort {
+    type Err = UnknownEffort;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
+            other => Err(UnknownEffort(other.to_owned())),
+        }
+    }
+}
+
 /// Everything needed to launch the `claude` binary.
 #[derive(Debug, Clone)]
 pub struct ClaudeConfig {
@@ -79,6 +130,8 @@ pub struct ClaudeConfig {
     pub timeout: Duration,
     /// `--permission-mode`.
     pub permission_mode: PermissionMode,
+    /// `--effort`: how much the model thinks before acting.
+    pub effort: Effort,
     /// Domains sandboxed shell commands may reach. Empty means none.
     pub allowed_domains: Vec<String>,
     /// Keep session transcripts under the Claude config dir after the job.
@@ -101,6 +154,7 @@ impl Default for ClaudeConfig {
             max_budget_usd: None,
             timeout: Duration::from_mins(30),
             permission_mode: PermissionMode::default(),
+            effort: Effort::default(),
             allowed_domains: Vec::new(),
             persist_sessions: false,
             config_dir: None,
@@ -140,6 +194,7 @@ impl ClaudeConfig {
             .arg("--print")
             .args(["--output-format", "json"])
             .args(["--permission-mode", self.permission_mode.as_cli_value()])
+            .args(["--effort", self.effort.as_cli_value()])
             .args(["--max-turns", &self.max_turns.to_string()])
             .args(["--settings", &self.settings_json()]);
         if let Some(model) = &self.model {
@@ -389,6 +444,7 @@ mod tests {
             max_turns: 7,
             max_budget_usd: Some(1.5),
             permission_mode: PermissionMode::BypassPermissions,
+            effort: Effort::XHigh,
             persist_sessions: false,
             config_dir: Some(PathBuf::from("/cfg")),
             mcp_config: Some(PathBuf::from("/cfg/mcp.json")),
@@ -407,6 +463,7 @@ mod tests {
                 .any(|w| w == ["--permission-mode", "bypassPermissions"])
         );
         assert!(args.windows(2).any(|w| w == ["--max-turns", "7"]));
+        assert!(args.windows(2).any(|w| w == ["--effort", "xhigh"]));
         assert!(args.windows(2).any(|w| w == ["--model", "opus"]));
         assert!(args.windows(2).any(|w| w == ["--max-budget-usd", "1.5"]));
         assert!(args.contains(&"--no-session-persistence".to_owned()));
@@ -440,6 +497,7 @@ mod tests {
             args.windows(2)
                 .any(|w| w == ["--permission-mode", "acceptEdits"])
         );
+        assert!(args.windows(2).any(|w| w == ["--effort", "low"]));
         // No MCP servers unless a file is given, and never inherited ones.
         assert!(
             args.windows(2)

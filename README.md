@@ -155,6 +155,7 @@ All settings come from the environment (a `.env` file is loaded if present).
 | `CLAUDE_MAX_BUDGET_USD`    | (none)             | `--max-budget-usd`                                   |
 | `CLAUDE_TIMEOUT_SECS`      | `1800`             | Wall-clock limit per job; the process is killed      |
 | `CLAUDE_PERMISSION_MODE`   | `acceptEdits`      | or `bypassPermissions` (see above)                   |
+| `CLAUDE_EFFORT`            | `low`              | `--effort`: `low`, `medium`, `high`, `xhigh` or `max` |
 | `CLAUDE_ALLOWED_DOMAINS`   | (none)             | Comma-separated hosts sandboxed shell commands may reach |
 | `CLAUDE_PERSIST_SESSIONS`  | `false`            | Keep transcripts for `claude --resume <session_id>`  |
 | `CLAUDE_CONFIG_DIR`        | (inherit)          | Separate Claude config dir for jobs                  |
