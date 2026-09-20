@@ -1,29 +1,30 @@
 # Day-to-day commands for developing and operating claude-job-runner.
 #
-# "Local" targets run on your machine. "Server" targets are meant to be run
-# on the EC2 host (as the `ubuntu` user, they use sudo); `make deploy` and
-# the `remote-*` targets run them over SSH for you.
+# Local targets (build, test, ...) run where you are. Server targets (env,
+# update, logs, ...) run on the EC2 host: invoked there they use sudo, invoked
+# from your laptop they forward themselves over SSH, so `make logs` works from
+# either side.
 
-EDITOR   ?= vim
-SERVICE  := claude-job-runner
-APP_DIR  := /home/runner/claude-job-runner
-SECRETS  := /etc/claude-job-runner/secrets.env
+EDITOR    ?= vim
+SERVICE   := claude-job-runner
+APP_DIR   := /home/runner/claude-job-runner
+SECRETS   := /etc/claude-job-runner/secrets.env
 AS_RUNNER := sudo -u runner -i
 
-# SSH settings for the remote-* targets (override: make deploy HOST=1.2.3.4).
-HOST     ?= 3.135.213.87
-KEY      ?= ~/.ssh/claude-job-runner.pem
-SSH      := ssh -i $(KEY) ubuntu@$(HOST)
+# SSH settings for forwarding (override: make logs HOST=1.2.3.4).
+HOST ?= 3.135.213.87
+KEY  ?= ~/.ssh/claude-job-runner.pem
+SSH  := ssh -i $(KEY) ubuntu@$(HOST)
+
+SERVER_TARGETS := env secrets update restart stop start status logs health job
+ON_SERVER := $(shell test -d $(APP_DIR) && echo 1)
 
 .DEFAULT_GOAL := help
-
-.PHONY: help build test lint run \
-        env secrets update restart stop start status logs health job \
-        ssh deploy remote-logs remote-status remote-env
+.PHONY: help build test lint run ssh deploy $(SERVER_TARGETS)
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
-	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
 
 # --- Local development -------------------------------------------------------
 
@@ -39,7 +40,16 @@ lint: ## Run clippy on all targets
 run: ## Run the daemon locally in the foreground
 	cargo run --release
 
-# --- Server operations (run on the EC2 host) --------------------------------
+ssh: ## Open a shell on the server
+	$(SSH)
+
+deploy: ## Push main to GitHub, then update + restart on the server
+	git push origin main
+	$(MAKE) update
+
+# --- Server operations -------------------------------------------------------
+
+ifeq ($(ON_SERVER),1)
 
 env: ## Edit the runner's .env, then restart the service
 	$(AS_RUNNER) $(EDITOR) $(APP_DIR)/.env
@@ -78,20 +88,12 @@ job: ## Submit a job: make job CHAT=12 PROMPT="Say hello"
 	@CHAT="$(CHAT)" PROMPT="$(PROMPT)" python3 -c 'import json,os; print(json.dumps({"chat_id": int(os.environ["CHAT"]), "content": os.environ["PROMPT"]}))' \
 	  | curl -s -X POST localhost:8080/jobs -H 'content-type: application/json' -d @-; echo
 
-# --- Remote shortcuts (run from your laptop) --------------------------------
+else
 
-ssh: ## Open a shell on the server
-	$(SSH)
+# Not on the server: run the same target there. -t gives vim/journalctl a tty.
+# sq wraps a value in single quotes for the remote shell, escaping any inside.
+sq = '$(subst ','\'',$(1))'
+$(SERVER_TARGETS):
+	$(SSH) -t "make --no-print-directory -C $(APP_DIR) $@ EDITOR=$(call sq,$(EDITOR)) CHAT=$(call sq,$(CHAT)) PROMPT=$(call sq,$(PROMPT))"
 
-deploy: ## Push main to GitHub, then update + restart on the server
-	git push origin main
-	$(SSH) 'make -C $(APP_DIR) update'
-
-remote-logs: ## Follow the service log from here
-	$(SSH) -t 'make -C $(APP_DIR) logs'
-
-remote-status: ## Show service status from here
-	$(SSH) 'make -C $(APP_DIR) status'
-
-remote-env: ## Edit the server .env from here
-	$(SSH) -t 'make -C $(APP_DIR) env'
+endif
