@@ -24,6 +24,18 @@ use tracing::{debug, warn};
 
 use crate::job::JobOutcome;
 
+/// MCP server that gives jobs SQL access to `agent_database_url`. Bash
+/// cannot reach the database from inside the sandbox (its network only goes
+/// out through an HTTP/SOCKS proxy), but MCP servers run outside it.
+const DB_MCP_SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/db_mcp.py");
+
+/// Appended to the system prompt when a database is available, so jobs know
+/// to look there instead of assuming they only have the workspace.
+const DB_SYSTEM_PROMPT: &str = "You have read-only access to the company's MySQL database \
+(CRM data: deals, customers, sales reps, etc.) through the `mcp__db__query` tool. When a \
+question is about business data, explore the schema (SHOW TABLES, DESCRIBE <table>) and \
+answer from the database rather than asking the user where the data lives.";
+
 /// Claude Code permission mode passed via `--permission-mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PermissionMode {
@@ -172,6 +184,13 @@ impl ClaudeConfig {
     /// The `--settings` payload that confines the session to `workspace`.
     #[must_use]
     pub fn settings_json(&self) -> String {
+        // The Read tool prompts for files outside cwd, and print mode turns
+        // every prompt into a denial; this opens reads machine-wide
+        // (user-level deny rules still win).
+        let mut allow = vec!["Read(//**)"];
+        if self.agent_database_url.is_some() {
+            allow.push("mcp__db");
+        }
         json!({
             "sandbox": {
                 "enabled": true,
@@ -182,10 +201,7 @@ impl ClaudeConfig {
             },
             "permissions": {
                 "defaultMode": self.permission_mode.as_cli_value(),
-                // The Read tool prompts for files outside cwd, and print mode
-                // turns every prompt into a denial; this opens reads machine-wide
-                // (user-level deny rules still win).
-                "allow": ["Read(//**)"],
+                "allow": allow,
             },
         })
         .to_string()
@@ -212,10 +228,18 @@ impl ClaudeConfig {
             cmd.arg("--no-session-persistence");
         }
         // Only the MCP servers we were told about, none by default.
-        match &self.mcp_config {
-            Some(path) => cmd.arg("--mcp-config").arg(path),
-            None => cmd.args(["--mcp-config", r#"{"mcpServers":{}}"#]),
-        };
+        if let Some(path) = &self.mcp_config {
+            cmd.arg("--mcp-config").arg(path);
+        }
+        if self.agent_database_url.is_some() {
+            let db = json!({
+                "mcpServers": { "db": { "command": "python3", "args": [DB_MCP_SCRIPT] } }
+            });
+            cmd.args(["--mcp-config", &db.to_string()]);
+            cmd.args(["--append-system-prompt", DB_SYSTEM_PROMPT]);
+        } else if self.mcp_config.is_none() {
+            cmd.args(["--mcp-config", r#"{"mcpServers":{}}"#]);
+        }
         cmd.arg("--strict-mcp-config");
         // A nested session refuses to start while this variable is set, so
         // strip it in case the runner itself was launched from Claude Code.
@@ -483,6 +507,11 @@ mod tests {
                 .any(|w| w == ["--mcp-config", "/cfg/mcp.json"])
         );
         assert!(args.contains(&"--strict-mcp-config".to_owned()));
+        assert!(args.iter().any(|a| a.contains("db_mcp.py")));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--append-system-prompt" && w[1].contains("mcp__db__query"))
+        );
 
         let envs: Vec<_> = cmd.get_envs().collect();
         assert!(envs.iter().any(|(k, v)| *k == "CLAUDECODE" && v.is_none()));
@@ -518,6 +547,22 @@ mod tests {
                 .any(|w| w == ["--mcp-config", r#"{"mcpServers":{}}"#])
         );
         assert!(args.contains(&"--strict-mcp-config".to_owned()));
+        assert!(!args.contains(&"--append-system-prompt".to_owned()));
+    }
+
+    #[test]
+    fn database_access_is_allowed_only_with_an_agent_url() {
+        let config = ClaudeConfig {
+            agent_database_url: Some("mysql://ro:pw@db/main".to_owned()),
+            ..ClaudeConfig::default()
+        };
+        let settings: serde_json::Value = serde_json::from_str(&config.settings_json()).unwrap();
+        assert_eq!(
+            settings["permissions"]["allow"],
+            json!(["Read(//**)", "mcp__db"])
+        );
+        let args = args_of(&config.command(Path::new("/tmp")));
+        assert!(!args.contains(&r#"{"mcpServers":{}}"#.to_owned()));
     }
 
     #[test]
