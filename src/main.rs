@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     // A missing .env is fine; a malformed one is not worth dying over either.
     let _ = dotenvy::dotenv();
@@ -32,6 +32,11 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
+    if let Some(path) = &config.claude.jobctl_mcp {
+        info!(path = %path.display(), "jobs get the jobctl MCP server");
+    } else {
+        info!("jobctl-mcp not found; jobs run without MCP tools");
+    }
 
     let store = JobStore::connect(&config.database_url, config.db_max_connections).await?;
     if config.requeue_pending_on_start {

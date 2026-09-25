@@ -702,6 +702,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jobctl"
+version = "0.1.0"
+dependencies = [
+ "dotenvy",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "jobctl-mcp"
+version = "0.1.0"
+dependencies = [
+ "jobctl",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

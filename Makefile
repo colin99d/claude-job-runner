@@ -12,7 +12,7 @@ SECRETS   := /etc/claude-job-runner/secrets.env
 AS_RUNNER := sudo -u runner -i
 
 # SSH settings for forwarding (override: make logs HOST=1.2.3.4).
-HOST ?= 3.135.213.87
+HOST ?= 3.16.79.74
 KEY  ?= ~/.ssh/claude-job-runner.pem
 SSH  := ssh -i $(KEY) ubuntu@$(HOST)
 
@@ -28,17 +28,17 @@ help: ## List available targets
 
 # --- Local development -------------------------------------------------------
 
-build: ## Build the release binary
-	cargo build --release
+build: ## Build the daemon, jobctl and jobctl-mcp
+	cargo build --release --workspace
 
 test: ## Run unit + integration tests (needs DATABASE_URL in .env)
-	cargo test
+	cargo test --workspace
 
 lint: ## Run clippy on all targets
-	cargo clippy --all-targets
+	cargo clippy --workspace --all-targets
 
 run: ## Run the daemon locally in the foreground
-	cargo run --release
+	cargo run --release --bin claude-job-runner
 
 ssh: ## Open a shell on the server
 	$(SSH)
@@ -60,7 +60,7 @@ secrets: ## Edit the Claude token file (root only), then restart the service
 	$(MAKE) restart
 
 update: ## Pull main, rebuild, restart
-	$(AS_RUNNER) sh -c 'cd $(APP_DIR) && git pull --ff-only && ~/.cargo/bin/cargo build --release'
+	$(AS_RUNNER) sh -c 'cd $(APP_DIR) && git pull --ff-only && ~/.cargo/bin/cargo build --release --workspace'
 	$(MAKE) restart
 
 restart: ## Restart the service and show its status
@@ -83,10 +83,9 @@ logs: ## Follow the service log
 health: ## Hit the local HTTP API
 	curl -s localhost:8080/health; echo
 
-job: ## Submit a job: make job CHAT=12 PROMPT="Say hello"
+job: ## Run a job and print the answer: make job CHAT=12 PROMPT="Say hello"
 	@test -n "$(CHAT)" || { echo "usage: make job CHAT=<chat_id> PROMPT=\"...\""; exit 1; }
-	@CHAT="$(CHAT)" PROMPT="$(PROMPT)" python3 -c 'import json,os; print(json.dumps({"chat_id": int(os.environ["CHAT"]), "content": os.environ["PROMPT"]}))' \
-	  | curl -s -X POST localhost:8080/jobs -H 'content-type: application/json' -d @-; echo
+	@$(APP_DIR)/target/release/jobctl ask --no-start --chat "$(CHAT)" -- "$(PROMPT)"
 
 else
 

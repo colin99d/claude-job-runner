@@ -49,6 +49,13 @@ CLI-level `--settings` payload that:
   cannot prompt, so a prompt is a denial);
 * adds a `Read(//**)` allow rule so the `Read` tool can open any file.
 
+Every job also gets one MCP server, `jobctl-mcp` (see *Tools*), with its
+tools allowed. MCP servers run outside the Bash sandbox, so this is how a
+job reaches the database: the sandbox's network only goes out through an
+HTTP/SOCKS proxy, and a plain `mysql` from Bash cannot even resolve the host.
+When `AGENT_DATABASE_URL` is set, the system prompt also tells the model the
+database is there.
+
 Verified on macOS: a job that reads `/Users/.../README.md`, writes
 `notes.md` in its workspace, and tries to write `~/should_not_exist.txt`
 reports the first two as successful and the third as blocked.
@@ -98,7 +105,8 @@ allow-listed), or to return a diff as its answer.
 4. Build and run:
 
    ```sh
-   cargo run --release
+   cargo build --release --workspace
+   target/release/claude-job-runner
    ```
 
 The daemon exits cleanly on Ctrl-C / SIGTERM. A job that is still running at
@@ -149,30 +157,8 @@ INSERT INTO chat_messages (chat_id, sender, content, is_agentic)
 VALUES (12, 'user', 'Summarise /Users/me/projects/foo/README.md in three bullets.', 1);
 ```
 
-and the runner picks it up on its next poll. For experiments there is a
-helper script that posts a message through the HTTP API and prints the
-answer when it arrives (it starts a runner if none is listening):
-
-```sh
-scripts/ask.sh --chat 12 "Summarise README.md in three bullets."
-echo "List the three largest files under ~/projects/foo." | ASK_CHAT_ID=12 scripts/ask.sh
-scripts/ask.sh --stop     # stop the runner the script started
-```
-
-To exercise the same path the chat application uses (a plain `INSERT`, no
-HTTP), `scripts/enqueue.py` writes the row directly and polls the table until
-the runner has answered, then prints both rows and the `ai` reply. It uses the
-admin login from the Granite Manager env file (`DB_HOST`/`DB_USER`/
-`DB_PASSWORD` in `~/general_datebase/.env`, override with `--env-file`) against
-the `main` database, so it can also create the `chats` row a message needs.
-It runs with [uv](https://docs.astral.sh/uv/), which fetches `pymysql` itself.
-
-```sh
-scripts/enqueue.py "Summarise README.md in three bullets."   # new chat for user 1
-scripts/enqueue.py --chat 12 "Follow-up in an existing chat"
-scripts/enqueue.py --no-wait "Long task"                       # print ids and exit
-scripts/enqueue.py --show 345                                  # watch an existing row
-```
+and the runner picks it up on its next poll. For experiments, use `jobctl`
+(see *Tools*).
 
 The HTTP API itself:
 
@@ -191,6 +177,44 @@ curl -X POST localhost:8080/jobs -H 'content-type: application/json' \
      -d '{"chat_id":12,"content":"List the three largest files under /Users/me/projects/foo."}'
 curl localhost:8080/jobs/1
 ```
+
+## Tools
+
+The workspace builds three separate binaries into `target/release/`:
+
+| Binary              | Crate            | What it is                                                   |
+|---------------------|------------------|--------------------------------------------------------------|
+| `claude-job-runner` | `.` (root)       | The daemon. Does not link the other two.                     |
+| `jobctl`            | `crates/jobctl`  | CLI for people; its library holds the actual logic.          |
+| `jobctl-mcp`        | `crates/jobctl-mcp` | The same commands as MCP tools, started once per job.     |
+
+`jobctl-mcp` is a thin wrapper over the `jobctl` library: to give jobs a new
+tool, add the logic to the library (and a `jobctl` subcommand if you want
+it too), then list it in `tools()` and handle it in `Server::call` in
+`crates/jobctl-mcp/src/main.rs`. Today it has one tool, `sql`. It connects
+lazily with the job's `DATABASE_URL` (the read-only `AGENT_DATABASE_URL`),
+so a job that never queries never opens a connection.
+
+```sh
+jobctl sql "SELECT COUNT(*) FROM deals"          # TSV with a header row; SQL may also come on stdin
+jobctl retrieve 12                               # whole chat 12, oldest first (--json for raw rows)
+jobctl enqueue "Summarise README.md."            # new chat for user 1, insert, wait for the answer
+jobctl enqueue --chat 12 "Follow-up"             # existing chat
+jobctl enqueue --no-wait "Long task"             # print ids and exit
+jobctl enqueue --show 345                        # watch an existing row
+jobctl ask --chat 12 "Say hello"                 # through the HTTP API; starts a runner if none answers
+jobctl ask --stop                                # stop the runner `ask` started
+```
+
+`sql`, `retrieve` and `enqueue` exercise the same path the chat application
+uses (plain SQL, no HTTP). Credentials: `--env-file PATH` (with `DB_HOST`/
+`DB_USER`/`DB_PASSWORD`, database `--database`, default `main`) if given,
+else `DATABASE_URL` if set, else the Granite Manager admin login in
+`~/general_datebase/.env`, which can also create the `chats` row a message
+needs. `ask` reads `HTTP_ADDR` from the environment or `.env` and starts
+`claude-job-runner` from the same directory as `jobctl`, logging to
+`runner.log` in the current directory (`--no-start` to only talk to a
+running one).
 
 ## Configuration
 
@@ -216,17 +240,20 @@ All settings come from the environment (a `.env` file is loaded if present).
 | `CLAUDE_ALLOWED_DOMAINS`   | (none)             | Comma-separated hosts sandboxed shell commands may reach |
 | `CLAUDE_PERSIST_SESSIONS`  | `false`            | Keep transcripts for `claude --resume <session_id>`  |
 | `CLAUDE_CONFIG_DIR`        | (inherit)          | Separate Claude config dir for jobs                  |
-| `CLAUDE_MCP_CONFIG`        | (none)             | MCP servers JSON file for jobs; unset = no MCP servers |
+| `CLAUDE_MCP_CONFIG`        | (none)             | Extra MCP servers JSON file for jobs                 |
+| `JOBCTL_MCP_BIN`           | `jobctl-mcp` next to the daemon, if built | MCP server every job gets; without one, jobs have no MCP tools |
 | `RUST_LOG`                 | `info`             | Log filter                                           |
 
 `CLAUDE_CONFIG_DIR` is worth setting if your personal `~/.claude` carries
 a `CLAUDE.md` or hooks you do not want every job to inherit. MCP servers are
-never inherited: jobs run with `--strict-mcp-config` and only the servers in
-`CLAUDE_MCP_CONFIG`, if any.
+never inherited: jobs run with `--strict-mcp-config` and only `jobctl-mcp`
+plus the servers in `CLAUDE_MCP_CONFIG`, if any.
 
 ## Resource usage
 
-The daemon itself is a few megabytes. Each running job is a `claude`
+The daemon itself is a few megabytes, and runs on a single-threaded tokio
+runtime to stay that way. Each job adds one `jobctl-mcp` process (about
+10 MB, single-threaded, one database connection opened on first use). Each running job is a `claude`
 process, which is a bundled JavaScript runtime: roughly 150–250 MB resident
 for a short job, more on long ones with big transcripts, plus whatever the
 job's shell commands spawn (`npm install`, test suites, compilers). Size
@@ -235,15 +262,15 @@ commands. CPU is mostly idle: a session spends nearly all of its time
 waiting on the API.
 
 Jobs are started with `DISABLE_AUTOUPDATER=1` and
-`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and with no MCP servers unless
-`CLAUDE_MCP_CONFIG` says otherwise, since every MCP server is another Node
-process.
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and with no MCP servers
+besides `jobctl-mcp` unless `CLAUDE_MCP_CONFIG` says otherwise, since most
+MCP servers are another Node process.
 
 ## Development
 
 ```sh
-cargo test            # unit + integration tests (MySQL, fake claude binary)
-cargo clippy --all-targets
+cargo test --workspace            # unit + integration tests (MySQL, fake claude binary)
+cargo clippy --workspace --all-targets
 ```
 
 The integration tests never call the real CLI: `tests/common/mod.rs`
@@ -265,6 +292,9 @@ src/
   worker.rs     polling loop with a semaphore bounding concurrent jobs
   http.rs       Hyper API
   main.rs       wiring and graceful shutdown
+crates/
+  jobctl/       library (db, sql, chats, api) + the `jobctl` CLI
+  jobctl-mcp/   MCP server over the jobctl library
 schema/         reference copy of the chat tables (source of truth: granite-webhooks)
 tests/          integration tests
 ```

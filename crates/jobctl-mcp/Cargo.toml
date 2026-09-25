@@ -1,0 +1,17 @@
+[package]
+name = "jobctl-mcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "MCP server (stdio) exposing jobctl commands as tools for Claude Code jobs"
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jobctl = { path = "../jobctl" }
+serde_json.workspace = true
+sqlx.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util"] }
+
+[lints]
+workspace = true

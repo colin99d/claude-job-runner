@@ -24,15 +24,14 @@ use tracing::{debug, warn};
 
 use crate::job::JobOutcome;
 
-/// MCP server that gives jobs SQL access to `agent_database_url`. Bash
-/// cannot reach the database from inside the sandbox (its network only goes
-/// out through an HTTP/SOCKS proxy), but MCP servers run outside it.
-const DB_MCP_SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/db_mcp.py");
+/// Name of the `jobctl-mcp` server in the job's MCP config; its tools show
+/// up as `mcp__jobctl__<tool>`.
+const JOBCTL_MCP_NAME: &str = "jobctl";
 
 /// Appended to the system prompt when a database is available, so jobs know
 /// to look there instead of assuming they only have the workspace.
 const DB_SYSTEM_PROMPT: &str = "You have read-only access to the company's MySQL database \
-(CRM data: deals, customers, sales reps, etc.) through the `mcp__db__query` tool. When a \
+(CRM data: deals, customers, sales reps, etc.) through the `mcp__jobctl__sql` tool. When a \
 question is about business data, explore the schema (SHOW TABLES, DESCRIBE <table>) and \
 answer from the database rather than asking the user where the data lives.";
 
@@ -155,6 +154,10 @@ pub struct ClaudeConfig {
     /// every server is a separate Node process, so servers configured in the
     /// user's settings are never inherited.
     pub mcp_config: Option<PathBuf>,
+    /// The `jobctl-mcp` executable, started for every job as an MCP server.
+    /// Its tools are how jobs reach things the Bash sandbox cannot, such as
+    /// the database (the sandbox's network only goes out through a proxy).
+    pub jobctl_mcp: Option<PathBuf>,
     /// `DATABASE_URL` as seen by the job, normally a read-only login. The
     /// runner's own (writable) `DATABASE_URL` is never passed on; with
     /// `None` the job sees no `DATABASE_URL` at all.
@@ -175,6 +178,7 @@ impl Default for ClaudeConfig {
             persist_sessions: false,
             config_dir: None,
             mcp_config: None,
+            jobctl_mcp: None,
             agent_database_url: None,
         }
     }
@@ -188,8 +192,9 @@ impl ClaudeConfig {
         // every prompt into a denial; this opens reads machine-wide
         // (user-level deny rules still win).
         let mut allow = vec!["Read(//**)"];
-        if self.agent_database_url.is_some() {
-            allow.push("mcp__db");
+        let jobctl_rule = format!("mcp__{JOBCTL_MCP_NAME}");
+        if self.jobctl_mcp.is_some() {
+            allow.push(&jobctl_rule);
         }
         json!({
             "sandbox": {
@@ -231,12 +236,14 @@ impl ClaudeConfig {
         if let Some(path) = &self.mcp_config {
             cmd.arg("--mcp-config").arg(path);
         }
-        if self.agent_database_url.is_some() {
-            let db = json!({
-                "mcpServers": { "db": { "command": "python3", "args": [DB_MCP_SCRIPT] } }
+        if let Some(jobctl) = &self.jobctl_mcp {
+            let servers = json!({
+                "mcpServers": { JOBCTL_MCP_NAME: { "command": jobctl, "args": [] } }
             });
-            cmd.args(["--mcp-config", &db.to_string()]);
-            cmd.args(["--append-system-prompt", DB_SYSTEM_PROMPT]);
+            cmd.args(["--mcp-config", &servers.to_string()]);
+            if self.agent_database_url.is_some() {
+                cmd.args(["--append-system-prompt", DB_SYSTEM_PROMPT]);
+            }
         } else if self.mcp_config.is_none() {
             cmd.args(["--mcp-config", r#"{"mcpServers":{}}"#]);
         }
@@ -482,6 +489,7 @@ mod tests {
             persist_sessions: false,
             config_dir: Some(PathBuf::from("/cfg")),
             mcp_config: Some(PathBuf::from("/cfg/mcp.json")),
+            jobctl_mcp: Some(PathBuf::from("/opt/bin/jobctl-mcp")),
             agent_database_url: Some("mysql://ro:pw@db/main".to_owned()),
             ..ClaudeConfig::default()
         };
@@ -507,10 +515,13 @@ mod tests {
                 .any(|w| w == ["--mcp-config", "/cfg/mcp.json"])
         );
         assert!(args.contains(&"--strict-mcp-config".to_owned()));
-        assert!(args.iter().any(|a| a.contains("db_mcp.py")));
+        assert!(
+            args.iter()
+                .any(|a| a.contains(r#""command":"/opt/bin/jobctl-mcp""#))
+        );
         assert!(
             args.windows(2)
-                .any(|w| w[0] == "--append-system-prompt" && w[1].contains("mcp__db__query"))
+                .any(|w| w[0] == "--append-system-prompt" && w[1].contains("mcp__jobctl__sql"))
         );
 
         let envs: Vec<_> = cmd.get_envs().collect();
@@ -551,25 +562,30 @@ mod tests {
     }
 
     #[test]
-    fn database_access_is_allowed_only_with_an_agent_url() {
+    fn jobctl_tools_are_allowed_when_its_server_is_configured() {
         let config = ClaudeConfig {
-            agent_database_url: Some("mysql://ro:pw@db/main".to_owned()),
+            jobctl_mcp: Some(PathBuf::from("/opt/bin/jobctl-mcp")),
             ..ClaudeConfig::default()
         };
         let settings: serde_json::Value = serde_json::from_str(&config.settings_json()).unwrap();
         assert_eq!(
             settings["permissions"]["allow"],
-            json!(["Read(//**)", "mcp__db"])
+            json!(["Read(//**)", "mcp__jobctl"])
         );
         let args = args_of(&config.command(Path::new("/tmp")));
         assert!(!args.contains(&r#"{"mcpServers":{}}"#.to_owned()));
+        // No database, so nothing to tell the model about it.
+        assert!(!args.contains(&"--append-system-prompt".to_owned()));
     }
 
     #[test]
     fn runner_database_url_is_never_inherited() {
         let cmd = ClaudeConfig::default().command(Path::new("/tmp"));
         let envs: Vec<_> = cmd.get_envs().collect();
-        assert!(envs.iter().any(|(k, v)| *k == "DATABASE_URL" && v.is_none()));
+        assert!(
+            envs.iter()
+                .any(|(k, v)| *k == "DATABASE_URL" && v.is_none())
+        );
     }
 
     #[test]

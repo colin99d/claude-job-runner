@@ -1,23 +1,55 @@
 [package]
 name = "claude-job-runner"
 version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Polls the chat_messages table for agentic user messages and answers each one in an isolated Claude Code session"
+license.workspace = true
+publish.workspace = true
+
+[workspace]
+# The daemon (this package) and two tools that are built next to it but never
+# linked into it: `jobctl` (a CLI for people) and `jobctl-mcp` (the same
+# commands as MCP tools for jobs). The daemon only knows `jobctl-mcp` as an
+# executable path.
+members = ["crates/jobctl", "crates/jobctl-mcp"]
+
+[workspace.package]
 edition = "2024"
 rust-version = "1.94"
-description = "Polls the chat_messages table for agentic user messages and answers each one in an isolated Claude Code session"
 license = "MIT"
 publish = false
 
+[workspace.dependencies]
+dotenvy = "0.15"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.9", default-features = false, features = ["json", "mysql", "runtime-tokio", "tls-rustls"] }
+thiserror = "2.0"
+tokio = { version = "1.53", features = ["macros", "rt"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
 [dependencies]
 bytes = "1.12"
-dotenvy = "0.15"
+dotenvy.workspace = true
 http-body-util = "0.1"
 hyper = { version = "1.11", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "server", "server-graceful", "tokio"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sqlx = { version = "0.9", default-features = false, features = ["derive", "json", "macros", "migrate", "mysql", "runtime-tokio", "tls-rustls"] }
-thiserror = "2.0"
-tokio = { version = "1.53", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["derive", "macros", "migrate"] }
+thiserror.workspace = true
+# Single-threaded runtime: the daemon mostly waits on the database and on
+# child processes, and every worker thread costs a stack and allocator arena.
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "signal", "sync", "time"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -25,11 +57,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 tempfile = "3.27"
 
-[lints.rust]
-unsafe_code = "forbid"
-missing_docs = "warn"
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
+[lints]
+workspace = true

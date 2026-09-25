@@ -65,6 +65,7 @@ impl Config {
             persist_sessions: optional("CLAUDE_PERSIST_SESSIONS")?.unwrap_or(false),
             config_dir: optional("CLAUDE_CONFIG_DIR")?,
             mcp_config: optional("CLAUDE_MCP_CONFIG")?,
+            jobctl_mcp: jobctl_mcp()?,
             agent_database_url: optional("AGENT_DATABASE_URL")?,
         };
 
@@ -81,6 +82,18 @@ impl Config {
             claude,
         })
     }
+}
+
+/// `JOBCTL_MCP_BIN`, or else `jobctl-mcp` next to this executable when it
+/// was built there (`cargo build --workspace` puts them side by side).
+fn jobctl_mcp() -> Result<Option<PathBuf>, ConfigError> {
+    if let Some(path) = optional("JOBCTL_MCP_BIN")? {
+        return Ok(Some(path));
+    }
+    Ok(env::current_exe()
+        .ok()
+        .map(|exe| exe.with_file_name("jobctl-mcp"))
+        .filter(|path| path.is_file()))
 }
 
 fn raw(name: &'static str) -> Result<Option<String>, ConfigError> {
