@@ -117,6 +117,15 @@ impl fmt::Display for JobStatus {
     }
 }
 
+/// Who asked for a job: the owner of the chat it was posted in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Requester {
+    /// `chats.user_id`, i.e. `users.id` of the person talking.
+    pub user_id: i64,
+    /// `chats.company_id`, the company that user works for.
+    pub company_id: i64,
+}
+
 /// An agentic user message as seen by the runner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
@@ -132,6 +141,10 @@ pub struct Job {
     pub reply_id: Option<MessageId>,
     /// Human-readable failure reason, once the job failed.
     pub error: Option<String>,
+    /// Owner of the chat, so the job knows who "I" and "my" refer to.
+    /// `None` only if the chat row is gone. Not part of the HTTP API.
+    #[serde(skip)]
+    pub requester: Option<Requester>,
 }
 
 /// Final outcome of running a job, used to update the row.

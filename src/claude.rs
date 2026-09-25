@@ -22,7 +22,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
-use crate::job::JobOutcome;
+use crate::job::{JobOutcome, Requester};
 
 /// Name of the `jobctl-mcp` server in the job's MCP config; its tools show
 /// up as `mcp__jobctl__<tool>`.
@@ -34,6 +34,22 @@ const DB_SYSTEM_PROMPT: &str = "You have read-only access to the company's MySQL
 (CRM data: deals, customers, sales reps, etc.) through the `mcp__jobctl__sql` tool. When a \
 question is about business data, explore the schema (SHOW TABLES, DESCRIBE <table>) and \
 answer from the database rather than asking the user where the data lives.";
+
+/// Appended to the system prompt for every job whose chat has an owner, so
+/// "I", "me" and "my" in the prompt resolve to a concrete user.
+fn requester_system_prompt(requester: Requester) -> String {
+    let Requester {
+        user_id,
+        company_id,
+    } = requester;
+    format!(
+        "The person talking to you is the user with `users.id = {user_id}` (company \
+         `company.id = {company_id}`). When they say \"I\", \"me\" or \"my\" (\"my deals\", \"my \
+         customers\", \"my sales this month\"), they mean this user: scope the answer to this \
+         user id, and look up their name and email in `users` if you need them. Do not ask them \
+         who they are."
+    )
+}
 
 /// Claude Code permission mode passed via `--permission-mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -212,9 +228,11 @@ impl ClaudeConfig {
         .to_string()
     }
 
-    /// Builds the command line for a run in `workspace` (prompt goes to stdin).
+    /// Builds the command line for a run in `workspace` on behalf of
+    /// `requester` (prompt goes to stdin).
     #[must_use]
-    pub fn command(&self, workspace: &Path) -> std::process::Command {
+    pub fn command(&self, workspace: &Path, requester: Option<Requester>) -> std::process::Command {
+        let mut system_prompt = Vec::new();
         let mut cmd = std::process::Command::new(&self.binary);
         cmd.current_dir(workspace)
             .arg("--print")
@@ -242,12 +260,18 @@ impl ClaudeConfig {
             });
             cmd.args(["--mcp-config", &servers.to_string()]);
             if self.agent_database_url.is_some() {
-                cmd.args(["--append-system-prompt", DB_SYSTEM_PROMPT]);
+                system_prompt.push(DB_SYSTEM_PROMPT.to_owned());
             }
         } else if self.mcp_config.is_none() {
             cmd.args(["--mcp-config", r#"{"mcpServers":{}}"#]);
         }
         cmd.arg("--strict-mcp-config");
+        if let Some(requester) = requester {
+            system_prompt.push(requester_system_prompt(requester));
+        }
+        if !system_prompt.is_empty() {
+            cmd.args(["--append-system-prompt", &system_prompt.join("\n\n")]);
+        }
         // A nested session refuses to start while this variable is set, so
         // strip it in case the runner itself was launched from Claude Code.
         cmd.env_remove("CLAUDECODE");
@@ -274,6 +298,8 @@ pub struct RunRequest<'a> {
     pub prompt: &'a str,
     /// Directory to run in; the only writable location.
     pub workspace: &'a Path,
+    /// Who asked, if known; tells the model who "I" and "my" are.
+    pub requester: Option<Requester>,
 }
 
 /// What Claude Code reported for a finished run.
@@ -418,7 +444,7 @@ impl CliRunner {
 
 impl ClaudeRunner for CliRunner {
     async fn run(&self, request: RunRequest<'_>) -> Result<RunReport, RunError> {
-        let mut command = Command::from(self.config.command(request.workspace));
+        let mut command = Command::from(self.config.command(request.workspace, request.requester));
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -494,7 +520,7 @@ mod tests {
             ..ClaudeConfig::default()
         };
         let ws = Path::new("/tmp/ws");
-        let cmd = config.command(ws);
+        let cmd = config.command(ws, None);
         let args = args_of(&cmd);
 
         assert_eq!(cmd.get_program(), "/opt/bin/claude");
@@ -544,7 +570,7 @@ mod tests {
 
     #[test]
     fn optional_flags_are_omitted_by_default() {
-        let args = args_of(&ClaudeConfig::default().command(Path::new("/tmp")));
+        let args = args_of(&ClaudeConfig::default().command(Path::new("/tmp"), None));
         assert!(!args.contains(&"--model".to_owned()));
         assert!(!args.contains(&"--max-budget-usd".to_owned()));
         assert!(
@@ -572,15 +598,46 @@ mod tests {
             settings["permissions"]["allow"],
             json!(["Read(//**)", "mcp__jobctl"])
         );
-        let args = args_of(&config.command(Path::new("/tmp")));
+        let args = args_of(&config.command(Path::new("/tmp"), None));
         assert!(!args.contains(&r#"{"mcpServers":{}}"#.to_owned()));
         // No database, so nothing to tell the model about it.
         assert!(!args.contains(&"--append-system-prompt".to_owned()));
     }
 
     #[test]
+    fn requester_is_named_in_the_system_prompt() {
+        let config = ClaudeConfig {
+            jobctl_mcp: Some(PathBuf::from("/opt/bin/jobctl-mcp")),
+            agent_database_url: Some("mysql://ro:pw@db/main".to_owned()),
+            ..ClaudeConfig::default()
+        };
+        let requester = Requester {
+            user_id: 42,
+            company_id: 7,
+        };
+        let args = args_of(&config.command(Path::new("/tmp"), Some(requester)));
+        let prompts: Vec<_> = args
+            .windows(2)
+            .filter(|w| w[0] == "--append-system-prompt")
+            .map(|w| w[1].as_str())
+            .collect();
+        // One flag carrying both parts.
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("mcp__jobctl__sql"));
+        assert!(prompts[0].contains("`users.id = 42`"));
+        assert!(prompts[0].contains("`company.id = 7`"));
+
+        // Without a database the requester is still named.
+        let args = args_of(&ClaudeConfig::default().command(Path::new("/tmp"), Some(requester)));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--append-system-prompt" && w[1].contains("`users.id = 42`"))
+        );
+    }
+
+    #[test]
     fn runner_database_url_is_never_inherited() {
-        let cmd = ClaudeConfig::default().command(Path::new("/tmp"));
+        let cmd = ClaudeConfig::default().command(Path::new("/tmp"), None);
         let envs: Vec<_> = cmd.get_envs().collect();
         assert!(
             envs.iter()
@@ -594,7 +651,7 @@ mod tests {
             persist_sessions: true,
             ..ClaudeConfig::default()
         };
-        let args = args_of(&config.command(Path::new("/tmp")));
+        let args = args_of(&config.command(Path::new("/tmp"), None));
         assert!(!args.contains(&"--no-session-persistence".to_owned()));
     }
 

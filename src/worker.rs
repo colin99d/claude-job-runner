@@ -151,6 +151,7 @@ impl<R: ClaudeRunner + 'static> Worker<R> {
         let request = RunRequest {
             prompt: &job.content,
             workspace: workspace.path(),
+            requester: job.requester,
         };
         let outcome = tokio::select! {
             run = self.inner.runner.run(request) => match run {

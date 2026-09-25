@@ -11,12 +11,13 @@
 //!   produced a partial answer);
 //! * ai row: `payload.in_reply_to` = id of the user row.
 //!
-//! The runner never touches `chats`; the chat application owns that table.
+//! The runner never writes `chats`; the chat application owns that table.
+//! It only reads the chat's `user_id`/`company_id` to tell a job who asked.
 
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{FromRow, MySqlPool, Row};
 
-use crate::job::{ChatId, Job, JobOutcome, JobStatus, MessageId, UnknownStatus};
+use crate::job::{ChatId, Job, JobOutcome, JobStatus, MessageId, Requester, UnknownStatus};
 
 /// How many times [`JobStore::claim_next`] retries when another worker
 /// wins the race for the same row.
@@ -60,6 +61,9 @@ struct JobRow {
     content: String,
     status: Option<String>,
     payload: Option<serde_json::Value>,
+    /// From `chats`; `NULL` only if the chat row is missing.
+    user_id: Option<i64>,
+    company_id: Option<i64>,
 }
 
 impl TryFrom<JobRow> for Job {
@@ -85,6 +89,13 @@ impl TryFrom<JobRow> for Job {
             status,
             reply_id,
             error,
+            requester: row
+                .user_id
+                .zip(row.company_id)
+                .map(|(user_id, company_id)| Requester {
+                    user_id,
+                    company_id,
+                }),
         })
     }
 }
@@ -137,8 +148,9 @@ impl JobStore {
     /// reported as absent.
     pub async fn get(&self, id: MessageId) -> Result<Option<Job>, StoreError> {
         let row: Option<JobRow> = sqlx::query_as(
-            "SELECT id, chat_id, content, status, payload FROM chat_messages \
-             WHERE id = ? AND sender = 'user' AND is_agentic = 1",
+            "SELECT m.id, m.chat_id, m.content, m.status, m.payload, c.user_id, c.company_id \
+             FROM chat_messages m LEFT JOIN chats c ON c.id = m.chat_id \
+             WHERE m.id = ? AND m.sender = 'user' AND m.is_agentic = 1",
         )
         .bind(id.get())
         .fetch_optional(&self.pool)

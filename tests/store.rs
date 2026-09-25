@@ -4,7 +4,7 @@ mod common;
 
 use std::collections::HashSet;
 
-use claude_job_runner::job::{JobOutcome, JobStatus, MessageId};
+use claude_job_runner::job::{JobOutcome, JobStatus, MessageId, Requester};
 use claude_job_runner::store::StoreError;
 use sqlx::{MySqlPool, Row};
 
@@ -21,6 +21,14 @@ async fn insert_then_get_returns_a_new_job(pool: MySqlPool) {
     assert_eq!(job.status, JobStatus::New);
     assert_eq!(job.reply_id, None);
     assert_eq!(job.error, None);
+    // `common::store` creates the chat for user 1 of company 1.
+    assert_eq!(
+        job.requester,
+        Some(Requester {
+            user_id: 1,
+            company_id: 1
+        })
+    );
 }
 
 #[sqlx::test(migrations = false)]

@@ -6,8 +6,8 @@
 --
 -- `chats` is reproduced here without its foreign keys to `users` and
 -- `company` so the file can stand alone; the integration tests load it into
--- a throw-away database. The runner only ever reads and writes
--- `chat_messages`.
+-- a throw-away database. The runner only writes `chat_messages`; from
+-- `chats` it reads `user_id` and `company_id` to tell jobs who is asking.
 
 CREATE TABLE IF NOT EXISTS chats (
   id INT AUTO_INCREMENT PRIMARY KEY,

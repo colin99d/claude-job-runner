@@ -322,6 +322,7 @@ struct CannedRunner(Result<RunReport, ()>);
 impl ClaudeRunner for CannedRunner {
     async fn run(&self, request: RunRequest<'_>) -> Result<RunReport, RunError> {
         assert!(request.workspace.is_dir(), "workspace exists while running");
+        assert!(request.requester.is_some(), "the chat's owner is passed on");
         tokio::task::yield_now().await;
         self.0
             .clone()

@@ -56,6 +56,11 @@ HTTP/SOCKS proxy, and a plain `mysql` from Bash cannot even resolve the host.
 When `AGENT_DATABASE_URL` is set, the system prompt also tells the model the
 database is there.
 
+The system prompt also names the person asking: the runner reads the chat's
+`user_id` and `company_id` from `chats` and tells the model that "I", "me"
+and "my" in the prompt mean `users.id = <user_id>`, so "show my deals" is
+scoped to that user without them having to say who they are.
+
 Verified on macOS: a job that reads `/Users/.../README.md`, writes
 `notes.md` in its workspace, and tries to write `~/should_not_exist.txt`
 reports the first two as successful and the third as blocked.
@@ -93,9 +98,10 @@ allow-listed), or to return a diff as its answer.
    reference copy (without the foreign keys to `users`/`company`) that the
    tests load into a throw-away database.
 
-   The runner touches only `chat_messages`: it reads `id`, `chat_id`,
+   The runner writes only `chat_messages`: it reads `id`, `chat_id`,
    `content`, `status`, `payload` of agentic user rows, updates `status` and
-   `payload`, and inserts `ai` rows.
+   `payload`, and inserts `ai` rows. From `chats` it only reads `user_id`
+   and `company_id`, to tell each job who is asking.
 
 2. Copy `.env.example` to `.env` and set at least `DATABASE_URL`.
 
