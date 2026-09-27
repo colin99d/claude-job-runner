@@ -75,7 +75,13 @@ async fn successful_run_is_parsed_and_invoked_correctly() {
         .iter()
         .position(|a| *a == "--append-system-prompt")
         .unwrap();
-    assert!(args[system_index + 1].contains("`users.id = 42`"));
+    // The company isolation rule leads; the requester's identity follows.
+    assert!(args[system_index + 1].contains("`company_id = 7`"));
+    assert!(
+        args[system_index + 1..]
+            .iter()
+            .any(|a| a.contains("`users.id = 42`"))
+    );
 }
 
 #[tokio::test]
