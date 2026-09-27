@@ -54,7 +54,7 @@ impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let claude = ClaudeConfig {
             binary: optional("CLAUDE_BIN")?.unwrap_or_else(|| PathBuf::from("claude")),
-            model: optional("CLAUDE_MODEL")?,
+            model: Some(optional("CLAUDE_MODEL")?.unwrap_or_else(|| "opus".to_owned())),
             max_turns: optional("CLAUDE_MAX_TURNS")?.unwrap_or(50),
             max_budget_usd: optional("CLAUDE_MAX_BUDGET_USD")?,
             timeout: Duration::from_secs(optional("CLAUDE_TIMEOUT_SECS")?.unwrap_or(30 * 60)),

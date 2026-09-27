@@ -237,7 +237,7 @@ All settings come from the environment (a `.env` file is loaded if present).
 | `HTTP_ADDR`                | `127.0.0.1:8080`   | Bind address of the API                              |
 | `REQUEUE_PENDING_ON_START` | `true`             | Reset orphaned `pending` rows; set `false` with several workers |
 | `CLAUDE_BIN`               | `claude`           | Executable to run                                    |
-| `CLAUDE_MODEL`             | (CLI default)      | `--model`                                            |
+| `CLAUDE_MODEL`             | `opus`             | `--model`                                            |
 | `CLAUDE_MAX_TURNS`         | `50`               | `--max-turns`                                        |
 | `CLAUDE_MAX_BUDGET_USD`    | (none)             | `--max-budget-usd`                                   |
 | `CLAUDE_TIMEOUT_SECS`      | `1800`             | Wall-clock limit per job; the process is killed      |
