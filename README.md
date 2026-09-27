@@ -56,6 +56,9 @@ HTTP/SOCKS proxy, and a plain `mysql` from Bash cannot even resolve the host.
 When `AGENT_DATABASE_URL` is set, the system prompt also tells the model the
 database is there.
 
+When `AES_KEY` is set, jobs also get read-only **QuickBooks Online** tools
+(see *QuickBooks*).
+
 The system prompt also names the person asking: the runner reads the chat's
 `user_id` and `company_id` from `chats` and tells the model that "I", "me"
 and "my" in the prompt mean `users.id = <user_id>`, so "show my deals" is
@@ -76,7 +79,8 @@ Things the sandbox does **not** do for you:
 * Reads of credentials such as `~/.ssh` are allowed by default, as in any
   Claude Code session. Add `denyRead` entries via `CLAUDE_CONFIG_DIR`
   settings if that matters to you.
-* The job's environment is the runner's, minus `DATABASE_URL`: the writable
+* The job's environment is the runner's, minus `DATABASE_URL`, `AES_KEY`,
+  `QBO_CLIENT_ID` and `QBO_CLIENT_SECRET`: the writable
   login stays with the daemon, and jobs get `AGENT_DATABASE_URL` (a
   read-only login) as their `DATABASE_URL` instead. Since jobs run as the
   same OS user and can read files, keep the writable URL out of `.env` and
@@ -197,7 +201,8 @@ The workspace builds three separate binaries into `target/release/`:
 `jobctl-mcp` is a thin wrapper over the `jobctl` library: to give jobs a new
 tool, add the logic to the library (and a `jobctl` subcommand if you want
 it too), then list it in `tools()` and handle it in `Server::call` in
-`crates/jobctl-mcp/src/main.rs`. Today it has one tool, `sql`. It connects
+`crates/jobctl-mcp/src/main.rs`. It has `sql`, plus the `qbo_*` tools when
+the job has QuickBooks access (see *QuickBooks*). It connects
 lazily with the job's `DATABASE_URL` (the read-only `AGENT_DATABASE_URL`),
 so a job that never queries never opens a connection.
 
@@ -221,6 +226,55 @@ needs. `ask` reads `HTTP_ADDR` from the environment or `.env` and starts
 `claude-job-runner` from the same directory as `jobctl`, logging to
 `runner.log` in the current directory (`--no-start` to only talk to a
 running one).
+
+## QuickBooks
+
+Invoices, payments and sales figures live in QuickBooks Online, not in the
+database. The chat application stores each company's QuickBooks connection
+in its `company` row (realm id, plus OAuth tokens encrypted with `AES_KEY`).
+The runner gives jobs the same read access the application has:
+
+1. Before a job starts, the daemon locks the asking company's row
+   (`SELECT ... FOR UPDATE`), decrypts its access token and, if it would
+   expire during the job (`CLAUDE_TIMEOUT_SECS` + 5 min), refreshes it with
+   Intuit and writes the rotated tokens back, encrypted exactly as the
+   application does. Holding the lock across the refresh keeps the runner and
+   the application from spending the same refresh token.
+2. The job gets only that access token and the realm id (`QBO_ACCESS_TOKEN`,
+   `QBO_REALM_ID`, `QBO_API_BASE`) plus who is asking (`QBO_COMPANY_ID`,
+   `QBO_USER_ID`, `QBO_REQUESTER_IS_ADMIN`). The token opens only that
+   company's QuickBooks account, so tenant isolation here does not rely on
+   the model. The AES key, the Intuit client secret, the refresh token and
+   the writable database login never reach a job.
+3. `jobctl-mcp` offers the `qbo_*` tools, ports of the application's own
+   QuickBooks code (`crates/jobctl/src/qbo.rs`):
+
+| Tool                     | Who     | What                                                                  |
+|--------------------------|---------|-----------------------------------------------------------------------|
+| `qbo_search_customers`   | all     | QuickBooks customers by name, with the CRM customers linked to them   |
+| `qbo_customer_invoices`  | all     | a customer's invoices, by CRM `customers.id` (matched by email, then name, if not linked) or QuickBooks id |
+| `qbo_invoice`            | all     | one invoice in full (lines, taxes, payments, addresses)               |
+| `qbo_sales_rep`          | all     | a rep's sales for a date range (class sales, customers and invoices); non-admins only their own |
+| `qbo_invoices_in_range`  | admins  | every invoice in a date range with totals and open balance            |
+| `qbo_class_sales`        | admins  | the Sales by Class report                                             |
+| `qbo_query`              | admins  | any read-only QuickBooks query (`select ... from Invoice ...`)        |
+| `qbo_report`             | admins  | any QuickBooks report as JSON (ProfitAndLoss, AgedReceivables, ...)   |
+
+Non-admins do not even see the admin tools, and only get invoices of
+customers linked to their company's CRM, as in the application's UI. Nothing
+can be written to QuickBooks, and unlike the application the tools do not
+save a newly matched `customers.qbo_id`.
+
+A company without a working connection (turned off, never connected, expired
+refresh token, Intuit unreachable) still runs the job, without the tools; its
+system prompt says why, so the answer can tell the user.
+
+Set `AES_KEY`, `QBO_CLIENT_ID`, `QBO_CLIENT_SECRET` and `QBO_ENV` to the chat
+application's values, in `/etc/claude-job-runner/secrets.env` (they are
+runner-only secrets). `QBO_ENV` must match the database the runner polls:
+production tokens only work with `QBO_ENV=production`. Do not point a
+runner at a copy of the production database with production tokens in it:
+refreshing them there would rotate, and so break, production's connection.
 
 ## Configuration
 
@@ -248,6 +302,10 @@ All settings come from the environment (a `.env` file is loaded if present).
 | `CLAUDE_CONFIG_DIR`        | (inherit)          | Separate Claude config dir for jobs                  |
 | `CLAUDE_MCP_CONFIG`        | (none)             | Extra MCP servers JSON file for jobs                 |
 | `JOBCTL_MCP_BIN`           | `jobctl-mcp` next to the daemon, if built | MCP server every job gets; without one, jobs have no MCP tools |
+| `AES_KEY`                  | (none)             | The chat application's 64-hex-char key; enables QuickBooks tools. Secret |
+| `QBO_CLIENT_ID`            | (none)             | Shared Intuit app, for companies without their own. Secret |
+| `QBO_CLIENT_SECRET`        | (none)             | See above. Secret                                    |
+| `QBO_ENV`                  | sandbox            | `production` for the production Intuit API           |
 | `RUST_LOG`                 | `info`             | Log filter                                           |
 
 `CLAUDE_CONFIG_DIR` is worth setting if your personal `~/.claude` carries
@@ -296,10 +354,11 @@ src/
   workspace.rs  WorkspaceRoot (sweep) and Workspace (create / remove)
   claude.rs     ClaudeConfig, CliRunner (spawn + parse), ClaudeRunner trait
   worker.rs     polling loop with a semaphore bounding concurrent jobs
+  qbo.rs        QboBroker: per-job QuickBooks access tokens (decrypt, refresh, store)
   http.rs       Hyper API
   main.rs       wiring and graceful shutdown
 crates/
-  jobctl/       library (db, sql, chats, api) + the `jobctl` CLI
+  jobctl/       library (db, sql, chats, api, qbo) + the `jobctl` CLI
   jobctl-mcp/   MCP server over the jobctl library
 schema/         reference copy of the chat tables (source of truth: granite-webhooks)
 tests/          integration tests

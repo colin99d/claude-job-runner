@@ -12,7 +12,7 @@ SECRETS   := /etc/claude-job-runner/secrets.env
 AS_RUNNER := sudo -u runner -i
 
 # SSH settings for forwarding (override: make logs HOST=1.2.3.4).
-HOST ?= 3.16.79.74
+HOST ?= 16.59.230.21
 KEY  ?= ~/.ssh/claude-job-runner.pem
 SSH  := ssh -i $(KEY) ubuntu@$(HOST)
 

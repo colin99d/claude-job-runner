@@ -6,12 +6,15 @@
 //! job's `DATABASE_URL`, which the runner sets to a read-only login; that
 //! login, not this server, is what keeps jobs from writing.
 //!
+//! When the runner gives the job QuickBooks access (`QBO_ACCESS_TOKEN` and
+//! friends, see [`jobctl::qbo`]), the `qbo_*` tools are offered as well.
+//!
 //! Adding a tool: describe it in [`tools`] and handle it in [`Server::call`],
 //! reusing the `jobctl` library for the actual work.
 
 use std::process::ExitCode;
 
-use jobctl::{db, sql};
+use jobctl::{db, qbo, sql};
 use serde_json::{Value, json};
 use sqlx::mysql::MySqlConnection;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -21,7 +24,13 @@ const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let mut server = Server::default();
+    let mut server = Server {
+        qbo: qbo::Session::from_env().unwrap_or_else(|err| {
+            eprintln!("jobctl-mcp: QuickBooks tools disabled: {err}");
+            None
+        }),
+        ..Server::default()
+    };
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
     loop {
@@ -51,8 +60,8 @@ async fn main() -> ExitCode {
 }
 
 /// Every tool this server offers, as `tools/list` reports them.
-fn tools() -> Value {
-    json!([
+fn tools(qbo: Option<&qbo::Session>) -> Value {
+    let mut tools = json!([
         {
             "name": "sql",
             "description": "Run one SQL statement against the company's MySQL database \
@@ -64,13 +73,19 @@ fn tools() -> Value {
                 "required": ["sql"],
             },
         },
-    ])
+    ]);
+    if let (Some(session), Value::Array(list)) = (qbo, &mut tools) {
+        list.extend(qbo::tools(session.scope().is_admin));
+    }
+    tools
 }
 
-/// Per-process state: the database connection, opened on first use.
+/// Per-process state: the database connection, opened on first use, and the
+/// job's QuickBooks session, if it has one.
 #[derive(Default)]
 struct Server {
     conn: Option<MySqlConnection>,
+    qbo: Option<qbo::Session>,
 }
 
 impl Server {
@@ -84,7 +99,7 @@ impl Server {
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "jobctl", "version": env!("CARGO_PKG_VERSION") },
             }),
-            "tools/list" => json!({ "tools": tools() }),
+            "tools/list" => json!({ "tools": tools(self.qbo.as_ref()) }),
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or_default();
                 let Some((text, is_error)) = self.call(name, &params["arguments"]).await else {
@@ -105,7 +120,7 @@ impl Server {
                 self.sql(arguments["sql"].as_str().unwrap_or_default())
                     .await
             }
-            _ => return None,
+            _ => self.qbo(name.strip_prefix("qbo_")?, arguments).await?,
         };
         Some(match outcome {
             Ok(text) => (text, false),
@@ -119,17 +134,39 @@ impl Server {
                 "the sql argument is empty".to_owned(),
             ));
         }
-        let conn = match &mut self.conn {
+        let outcome = sql::query(self.connection().await?, statement).await;
+        self.forget_broken_connection(&outcome);
+        outcome
+    }
+
+    /// Runs QuickBooks tool `name`; `None` if this job has no such tool.
+    async fn qbo(&mut self, name: &str, arguments: &Value) -> Option<jobctl::Result<String>> {
+        let session = self.qbo.clone()?;
+        if let Err(err) = session.authorize(name)? {
+            return Some(Err(err));
+        }
+        let conn = match self.connection().await {
+            Ok(conn) => conn,
+            Err(err) => return Some(Err(err)),
+        };
+        let outcome = session.call(conn, name, arguments).await?;
+        self.forget_broken_connection(&outcome);
+        Some(outcome)
+    }
+
+    async fn connection(&mut self) -> jobctl::Result<&mut MySqlConnection> {
+        Ok(match &mut self.conn {
             Some(conn) => conn,
             conn @ None => conn.insert(connect().await?),
-        };
-        let outcome = sql::query(conn, statement).await;
-        // A dropped connection (idle timeout, server restart) is reopened
-        // on the next call instead of failing every call after it.
-        if matches!(&outcome, Err(jobctl::Error::Database(err)) if is_connection_error(err)) {
+        })
+    }
+
+    /// A dropped connection (idle timeout, server restart) is reopened on
+    /// the next call instead of failing every call after it.
+    fn forget_broken_connection<T>(&mut self, outcome: &jobctl::Result<T>) {
+        if matches!(outcome, Err(jobctl::Error::Database(err)) if is_connection_error(err)) {
             self.conn = None;
         }
-        outcome
     }
 }
 
@@ -194,6 +231,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(list["result"]["tools"][0]["name"], "sql");
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 1);
 
         let unknown = ask(
             &mut server,
@@ -207,6 +245,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing["error"]["code"], -32601);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn quickbooks_tools_follow_the_session() {
+        let scope = |is_admin| qbo::Scope {
+            company_id: 1,
+            user_id: 2,
+            is_admin,
+        };
+        let mut server = Server {
+            qbo: Some(qbo::Session::new("https://x", "123", "t", scope(false)).unwrap()),
+            ..Server::default()
+        };
+        let list = ask(
+            &mut server,
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(names.contains(&"qbo_invoice".to_owned()));
+        assert!(!names.contains(&"qbo_query".to_owned()));
+
+        // Unknown and admin-only tools are refused before the database or
+        // QuickBooks is contacted (this test has neither).
+        let reply = ask(
+            &mut server,
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"qbo_query","arguments":{"query":"select * from Invoice"}}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("only admins")
+        );
+
+        let reply = ask(
+            &mut server,
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"qbo_nope","arguments":{}}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply["error"]["code"], -32602);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -6,12 +6,14 @@
 //! * [`chats`] reads and writes `chats` / `chat_messages` the way the chat
 //!   application does.
 //! * [`api`] talks to a running daemon over its HTTP API.
+//! * [`qbo`] reads a company's QuickBooks Online account for a job.
 //!
 //! Everything here returns data; printing is left to the binaries.
 
 pub mod api;
 pub mod chats;
 pub mod db;
+pub mod qbo;
 pub mod sql;
 
 /// Errors produced by this crate.
@@ -29,6 +31,12 @@ pub enum Error {
     /// Talking to the runner's HTTP API failed.
     #[error("{0}")]
     Http(String),
+    /// A tool argument is missing or malformed.
+    #[error("{0}")]
+    InvalidArgument(String),
+    /// The requester may not see what they asked for.
+    #[error("{0}")]
+    Denied(String),
     /// Local I/O failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),

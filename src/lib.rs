@@ -12,12 +12,15 @@
 //!   OS-level sandbox so the session can read the whole machine but write
 //!   only inside the workspace.
 //! * [`worker::Worker`] wires the three together in a polling loop.
+//! * [`qbo::QboBroker`] hands each job a QuickBooks access token for the
+//!   asking company, refreshing the stored tokens when needed.
 //! * [`http`] exposes a tiny Hyper API for enqueuing and inspecting jobs.
 
 pub mod claude;
 pub mod config;
 pub mod http;
 pub mod job;
+pub mod qbo;
 pub mod store;
 pub mod worker;
 pub mod workspace;

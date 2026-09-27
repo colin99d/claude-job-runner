@@ -2,10 +2,12 @@
 //! shuts everything down cleanly on Ctrl-C / SIGTERM.
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use claude_job_runner::claude::CliRunner;
 use claude_job_runner::config::Config;
 use claude_job_runner::http;
+use claude_job_runner::qbo::QboBroker;
 use claude_job_runner::store::JobStore;
 use claude_job_runner::worker::Worker;
 use claude_job_runner::workspace::WorkspaceRoot;
@@ -52,10 +54,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         info!(swept, "removed stale workspaces");
     }
 
+    let mut runner = CliRunner::new(config.claude.clone());
+    match &config.qbo {
+        Some(qbo) if config.claude.jobctl_mcp.is_some() => {
+            // A token handed to a job must outlive the job.
+            let valid_for = config.claude.timeout + Duration::from_mins(5);
+            runner = runner.with_qbo(QboBroker::new(store.pool().clone(), qbo, valid_for)?);
+            info!(environment = ?qbo.environment, "jobs get QuickBooks tools");
+        }
+        Some(_) => info!("AES_KEY is set but jobctl-mcp is missing; jobs get no QuickBooks tools"),
+        None => info!("AES_KEY not set; jobs get no QuickBooks tools"),
+    }
+
     let shutdown = CancellationToken::new();
     let worker = Worker::new(
         store.clone(),
-        CliRunner::new(config.claude.clone()),
+        runner,
         root,
         config.poll_interval,
         config.max_concurrent_jobs,

@@ -23,6 +23,7 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::job::{JobOutcome, Requester};
+use crate::qbo::{QboBroker, QboJobAccess};
 
 /// Name of the `jobctl-mcp` server in the job's MCP config; its tools show
 /// up as `mcp__jobctl__<tool>`.
@@ -34,6 +35,44 @@ const DB_SYSTEM_PROMPT: &str = "You have read-only access to the company's MySQL
 (CRM data: deals, customers, sales reps, etc.) through the `mcp__jobctl__sql` tool. When a \
 question is about business data, explore the schema (SHOW TABLES, DESCRIBE <table>) and \
 answer from the database rather than asking the user where the data lives.";
+
+/// Runner secrets that must never reach a job: the AES key and Intuit app
+/// credentials only the runner uses to refresh QuickBooks tokens.
+const RUNNER_ONLY_ENV: [&str; 3] = ["AES_KEY", "QBO_CLIENT_ID", "QBO_CLIENT_SECRET"];
+
+/// Variables through which `jobctl-mcp` learns about QuickBooks; set only
+/// for a connected company, and cleared otherwise so nothing is inherited.
+const QBO_JOB_ENV: [&str; 6] = [
+    "QBO_ACCESS_TOKEN",
+    "QBO_REALM_ID",
+    "QBO_API_BASE",
+    "QBO_COMPANY_ID",
+    "QBO_USER_ID",
+    "QBO_REQUESTER_IS_ADMIN",
+];
+
+/// Appended to the system prompt when the job has QuickBooks tools.
+fn qbo_system_prompt(is_admin: bool) -> String {
+    let admin_tools = if is_admin {
+        " As an admin, this user also gets `qbo_invoices_in_range`, `qbo_class_sales`, \
+         `qbo_query` (read-only QuickBooks query language, e.g. `select * from Invoice where \
+         Balance > '0' MAXRESULTS 100`) and `qbo_report` (any QuickBooks report, e.g. \
+         ProfitAndLoss, AgedReceivables, CustomerSales)."
+    } else {
+        ""
+    };
+    format!(
+        "You also have read-only access to this company's QuickBooks Online account (invoices, \
+         payments, customers, sales by sales rep) through the `mcp__jobctl__qbo_*` tools. \
+         Invoices live in QuickBooks, not in the MySQL database; a CRM customer is linked to its \
+         QuickBooks customer by `customers.qbo_id`, and sales reps map to QuickBooks classes \
+         named after them. The tools are already limited to this company's QuickBooks account. \
+         Use `qbo_customer_invoices` with a CRM `customers.id` for questions about a customer's \
+         invoices, `qbo_invoice` for one invoice's lines and payments, `qbo_search_customers` \
+         to find a QuickBooks customer by name, and `qbo_sales_rep` for a rep's QuickBooks sales \
+         over a date range.{admin_tools} Nothing in QuickBooks can be changed from here."
+    )
+}
 
 /// Appended to the system prompt for every job whose chat has an owner, so
 /// "I", "me" and "my" in the prompt resolve to a concrete user. Every
@@ -288,6 +327,18 @@ impl ClaudeConfig {
     /// `requester` (prompt goes to stdin).
     #[must_use]
     pub fn command(&self, workspace: &Path, requester: Option<Requester>) -> std::process::Command {
+        self.command_with_qbo(workspace, requester, None)
+    }
+
+    /// Like [`Self::command`], also handing the job its QuickBooks access
+    /// (only used when the job has both `jobctl-mcp` and a requester).
+    #[must_use]
+    pub fn command_with_qbo(
+        &self,
+        workspace: &Path,
+        requester: Option<Requester>,
+        qbo: Option<&QboJobAccess>,
+    ) -> std::process::Command {
         let mut system_prompt = Vec::new();
         let mut cmd = std::process::Command::new(&self.binary);
         cmd.current_dir(workspace)
@@ -324,6 +375,38 @@ impl ClaudeConfig {
         cmd.arg("--strict-mcp-config");
         if let Some(requester) = requester {
             system_prompt.push(requester_system_prompt(requester));
+        }
+        for name in RUNNER_ONLY_ENV.iter().chain(&QBO_JOB_ENV) {
+            cmd.env_remove(name);
+        }
+        match (qbo, requester, self.jobctl_mcp.is_some()) {
+            (
+                Some(QboJobAccess::Connected {
+                    realm_id,
+                    access_token,
+                    api_base,
+                }),
+                Some(requester),
+                true,
+            ) => {
+                cmd.env("QBO_ACCESS_TOKEN", access_token)
+                    .env("QBO_REALM_ID", realm_id)
+                    .env("QBO_API_BASE", api_base)
+                    .env("QBO_COMPANY_ID", requester.company_id.to_string())
+                    .env("QBO_USER_ID", requester.user_id.to_string())
+                    .env(
+                        "QBO_REQUESTER_IS_ADMIN",
+                        if requester.is_admin { "1" } else { "0" },
+                    );
+                system_prompt.push(qbo_system_prompt(requester.is_admin));
+            }
+            (Some(QboJobAccess::Unavailable(reason)), Some(_), true) => {
+                system_prompt.push(format!(
+                    "QuickBooks (invoices, payments) is not available for this question: \
+                     {reason} If the user asks about QuickBooks data, tell them so."
+                ));
+            }
+            _ => {}
         }
         if !system_prompt.is_empty() {
             cmd.args(["--append-system-prompt", &system_prompt.join("\n\n")]);
@@ -478,13 +561,21 @@ pub trait ClaudeRunner: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct CliRunner {
     config: ClaudeConfig,
+    qbo: Option<QboBroker>,
 }
 
 impl CliRunner {
     /// Creates a runner from its configuration.
     #[must_use]
     pub const fn new(config: ClaudeConfig) -> Self {
-        Self { config }
+        Self { config, qbo: None }
+    }
+
+    /// Gives every job with a requester QuickBooks access for its company.
+    #[must_use]
+    pub fn with_qbo(mut self, broker: QboBroker) -> Self {
+        self.qbo = Some(broker);
+        self
     }
 
     /// The configuration in use.
@@ -500,7 +591,17 @@ impl CliRunner {
 
 impl ClaudeRunner for CliRunner {
     async fn run(&self, request: RunRequest<'_>) -> Result<RunReport, RunError> {
-        let mut command = Command::from(self.config.command(request.workspace, request.requester));
+        let qbo = match (&self.qbo, request.requester) {
+            (Some(broker), Some(requester)) if self.config.jobctl_mcp.is_some() => {
+                Some(broker.access(requester.company_id).await)
+            }
+            _ => None,
+        };
+        let mut command = Command::from(self.config.command_with_qbo(
+            request.workspace,
+            request.requester,
+            qbo.as_ref(),
+        ));
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -742,6 +843,115 @@ mod tests {
                 w[0] == "--append-system-prompt" && w[1].contains("`company_id = 7`")
             }));
         }
+    }
+
+    /// The value `cmd` sets for `name`, if it sets one.
+    fn env_of(cmd: &std::process::Command, name: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(key, _)| *key == name)
+            .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    /// Whether `cmd` explicitly removes `name` from the inherited environment.
+    fn env_removed(cmd: &std::process::Command, name: &str) -> bool {
+        cmd.get_envs()
+            .any(|(key, value)| key == name && value.is_none())
+    }
+
+    fn system_prompt_of(cmd: &std::process::Command) -> String {
+        args_of(cmd)
+            .windows(2)
+            .find(|w| w[0] == "--append-system-prompt")
+            .map(|w| w[1].clone())
+            .unwrap_or_default()
+    }
+
+    fn connected() -> QboJobAccess {
+        QboJobAccess::Connected {
+            realm_id: "9130".to_owned(),
+            access_token: "tok".to_owned(),
+            api_base: "https://sandbox-quickbooks.api.intuit.com".to_owned(),
+        }
+    }
+
+    #[test]
+    fn connected_quickbooks_is_handed_to_the_job() {
+        let config = ClaudeConfig {
+            jobctl_mcp: Some(PathBuf::from("/opt/bin/jobctl-mcp")),
+            ..ClaudeConfig::default()
+        };
+        let requester = Requester {
+            user_id: 42,
+            company_id: 7,
+            is_admin: false,
+        };
+        let cmd = config.command_with_qbo(Path::new("/tmp"), Some(requester), Some(&connected()));
+        assert_eq!(env_of(&cmd, "QBO_ACCESS_TOKEN").as_deref(), Some("tok"));
+        assert_eq!(env_of(&cmd, "QBO_REALM_ID").as_deref(), Some("9130"));
+        assert_eq!(env_of(&cmd, "QBO_COMPANY_ID").as_deref(), Some("7"));
+        assert_eq!(env_of(&cmd, "QBO_USER_ID").as_deref(), Some("42"));
+        assert_eq!(env_of(&cmd, "QBO_REQUESTER_IS_ADMIN").as_deref(), Some("0"));
+        let prompt = system_prompt_of(&cmd);
+        assert!(prompt.contains("mcp__jobctl__qbo_"));
+        assert!(!prompt.contains("qbo_query"));
+        // The token never appears on the command line.
+        assert!(!args_of(&cmd).iter().any(|arg| arg.contains("tok")));
+    }
+
+    #[test]
+    fn admins_are_told_about_the_admin_tools() {
+        let config = ClaudeConfig {
+            jobctl_mcp: Some(PathBuf::from("/opt/bin/jobctl-mcp")),
+            ..ClaudeConfig::default()
+        };
+        let requester = Requester {
+            user_id: 42,
+            company_id: 7,
+            is_admin: true,
+        };
+        let cmd = config.command_with_qbo(Path::new("/tmp"), Some(requester), Some(&connected()));
+        assert_eq!(env_of(&cmd, "QBO_REQUESTER_IS_ADMIN").as_deref(), Some("1"));
+        assert!(system_prompt_of(&cmd).contains("qbo_query"));
+    }
+
+    #[test]
+    fn unavailable_quickbooks_is_explained_and_secrets_are_stripped() {
+        let config = ClaudeConfig {
+            jobctl_mcp: Some(PathBuf::from("/opt/bin/jobctl-mcp")),
+            ..ClaudeConfig::default()
+        };
+        let requester = Requester {
+            user_id: 42,
+            company_id: 7,
+            is_admin: true,
+        };
+        let access = QboJobAccess::Unavailable("QuickBooks is not connected.".to_owned());
+        let cmd = config.command_with_qbo(Path::new("/tmp"), Some(requester), Some(&access));
+        assert!(system_prompt_of(&cmd).contains("QuickBooks is not connected."));
+        for name in RUNNER_ONLY_ENV.iter().chain(&QBO_JOB_ENV) {
+            assert!(env_removed(&cmd, name), "{name} must be removed");
+        }
+    }
+
+    #[test]
+    fn quickbooks_needs_jobctl_and_a_requester() {
+        let requester = Requester {
+            user_id: 42,
+            company_id: 7,
+            is_admin: true,
+        };
+        let without_mcp = ClaudeConfig::default().command_with_qbo(
+            Path::new("/tmp"),
+            Some(requester),
+            Some(&connected()),
+        );
+        assert!(env_removed(&without_mcp, "QBO_ACCESS_TOKEN"));
+        let config = ClaudeConfig {
+            jobctl_mcp: Some(PathBuf::from("/opt/bin/jobctl-mcp")),
+            ..ClaudeConfig::default()
+        };
+        let anonymous = config.command_with_qbo(Path::new("/tmp"), None, Some(&connected()));
+        assert!(env_removed(&anonymous, "QBO_ACCESS_TOKEN"));
     }
 
     #[test]

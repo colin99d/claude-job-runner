@@ -1,0 +1,2 @@
+# "QuickBooks" is a product name, not an identifier to put in backticks.
+doc-valid-idents = ["QuickBooks", ".."]

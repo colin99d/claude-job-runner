@@ -22,6 +22,10 @@ publish = false
 
 [workspace.dependencies]
 dotenvy = "0.15"
+# HTTPS client for QuickBooks. rustls with the ring provider (already used by
+# sqlx) instead of reqwest's default aws-lc-rs, which needs cmake to build.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sqlx = { version = "0.9", default-features = false, features = ["json", "mysql", "runtime-tokio", "tls-rustls"] }
@@ -38,11 +42,16 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 
 [dependencies]
+base64 = "0.22"
 bytes = "1.12"
 dotenvy.workspace = true
 http-body-util = "0.1"
 hyper = { version = "1.11", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "server", "server-graceful", "tokio"] }
+reqwest.workspace = true
+# AES-256-GCM for the QuickBooks tokens the chat application stores encrypted.
+ring = "0.17"
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["derive", "macros", "migrate"] }

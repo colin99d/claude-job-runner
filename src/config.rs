@@ -8,6 +8,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use crate::claude::{ClaudeConfig, Effort, PermissionMode};
+use crate::qbo::{QboConfig, QboEnvironment};
 
 /// Errors from reading the environment.
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +46,9 @@ pub struct Config {
     pub requeue_pending_on_start: bool,
     /// Settings for the `claude` subprocess.
     pub claude: ClaudeConfig,
+    /// QuickBooks access for jobs; `None` (no `AES_KEY`) means jobs get no
+    /// QuickBooks tools.
+    pub qbo: Option<QboConfig>,
 }
 
 impl Config {
@@ -80,8 +84,22 @@ impl Config {
                 .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 8080))),
             requeue_pending_on_start: optional("REQUEUE_PENDING_ON_START")?.unwrap_or(true),
             claude,
+            qbo: qbo()?,
         })
     }
+}
+
+/// QuickBooks settings, named as in the chat application's environment.
+fn qbo() -> Result<Option<QboConfig>, ConfigError> {
+    let Some(aes_key_hex) = raw("AES_KEY")? else {
+        return Ok(None);
+    };
+    Ok(Some(QboConfig {
+        aes_key_hex,
+        client_id: raw("QBO_CLIENT_ID")?,
+        client_secret: raw("QBO_CLIENT_SECRET")?,
+        environment: QboEnvironment::from_env_value(&raw("QBO_ENV")?.unwrap_or_default()),
+    }))
 }
 
 /// `JOBCTL_MCP_BIN`, or else `jobctl-mcp` next to this executable when it
