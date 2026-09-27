@@ -124,6 +124,11 @@ pub struct Requester {
     pub user_id: i64,
     /// `chats.company_id`, the company that user works for.
     pub company_id: i64,
+    /// Whether that user is an admin, from `payload.requester_is_admin` on
+    /// the message (written by the chat application). Anything but an
+    /// explicit `true`/`1` counts as not an admin, so non-admins only ever
+    /// get their own data.
+    pub is_admin: bool,
 }
 
 /// An agentic user message as seen by the runner.

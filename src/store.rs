@@ -11,6 +11,9 @@
 //!   produced a partial answer);
 //! * ai row: `payload.in_reply_to` = id of the user row.
 //!
+//! The chat application may also set `payload.requester_is_admin` on the
+//! user row; see [`Requester::is_admin`].
+//!
 //! The runner never writes `chats`; the chat application owns that table.
 //! It only reads the chat's `user_id`/`company_id` to tell a job who asked.
 
@@ -82,6 +85,9 @@ impl TryFrom<JobRow> for Job {
             .and_then(|p| p.get("error"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
+        let is_admin = payload
+            .and_then(|p| p.get("requester_is_admin"))
+            .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64() == Some(1));
         Ok(Self {
             id,
             chat_id: ChatId::new(row.chat_id),
@@ -95,6 +101,7 @@ impl TryFrom<JobRow> for Job {
                 .map(|(user_id, company_id)| Requester {
                     user_id,
                     company_id,
+                    is_admin,
                 }),
         })
     }

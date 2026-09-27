@@ -32,6 +32,7 @@ async fn successful_run_is_parsed_and_invoked_correctly() {
             requester: Some(Requester {
                 user_id: 42,
                 company_id: 7,
+                is_admin: false,
             }),
         })
         .await

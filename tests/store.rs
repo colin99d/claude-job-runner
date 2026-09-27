@@ -26,9 +26,39 @@ async fn insert_then_get_returns_a_new_job(pool: MySqlPool) {
         job.requester,
         Some(Requester {
             user_id: 1,
-            company_id: 1
+            company_id: 1,
+            is_admin: false,
         })
     );
+}
+
+#[sqlx::test(migrations = false)]
+async fn requester_is_admin_only_when_the_payload_says_so(pool: MySqlPool) {
+    let (store, chat) = common::store(pool.clone()).await;
+    // The first case is what the chat application writes.
+    let cases = [
+        (Some(r#"{"requester_is_admin": true}"#), true),
+        (Some(r#"{"requester_is_admin": 1}"#), true),
+        (Some(r#"{"requester_is_admin": false}"#), false),
+        (Some(r#"{"requester_is_admin": "true"}"#), false),
+        (Some(r#"{"other": 1}"#), false),
+        (None, false),
+    ];
+    for (payload, expected) in cases {
+        let id = store.insert(chat, "x").await.unwrap();
+        sqlx::query("UPDATE chat_messages SET payload = CAST(? AS JSON) WHERE id = ?")
+            .bind(payload)
+            .bind(id.get())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = store.get(id).await.unwrap().expect("job exists");
+        assert_eq!(
+            job.requester.map(|r| r.is_admin),
+            Some(expected),
+            "payload {payload:?}"
+        );
+    }
 }
 
 #[sqlx::test(migrations = false)]
